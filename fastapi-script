@@ -1,0 +1,109 @@
+
+pipeline {
+    
+    agent any
+
+    environment {
+      
+        FOLDER_NAME="Geport-fastapi"
+        // "build-${sh(script:'date +%Y%m%d-%H%M%S', returnStdout: true).trim()}"
+        TAG = "${sh(script:'date +%Y%m%d-%H%M%S', returnStdout: true).trim()}"
+        ENV_FILE = credentials('fastapi-env-file')
+    }
+    stages {
+        
+        stage('git clone when push'){
+            steps{
+                script{
+                    dir(FOLDER_NAME) {
+                        // main에서 commit과 push가 일어나면 자동적으로 script 실행 후 repo 가져오기
+                        git branch: 'develop', credentialsId: 'GitHub-geport-FE', url: 'https://github.com/GO-GlobalOptimum/Geport-MVP-BackEnd.git'
+                    }
+
+                }
+            }
+        }
+        stage('Prepare .env File') {
+            steps {
+                script {
+                    dir(FOLDER_NAME) {
+                        // Secret File Credential을 작업 디렉토리로 옮김
+                        withCredentials([file(credentialsId: 'fastapi-env-file', variable: 'SECRET_ENV_FILE')]) {
+                            sh 'cp $SECRET_ENV_FILE ${WORKSPACE}/${FOLDER_NAME}/fastapi_env_file'
+                        }
+                    }
+                }
+            }
+        }
+        stage('Build') {
+            steps {
+                script {
+                    dir(FOLDER_NAME) {
+                        // 디버그: 디렉토리 내용 확인
+                        sh 'ls -a'
+                        // .env 파일의 내용을 읽어 Docker 빌드 명령어에 --build-arg로 전달
+                        def buildArgs = sh(script: '''
+                            #!/bin/bash
+                            env_file="${WORKSPACE}/${FOLDER_NAME}/fastapi_env_file"
+                            build_args=""  # 빈 문자열로 초기화
+                            while IFS='=' read -r key value; do
+                              key=$(echo $key | tr -d ' ')   # 키에서 공백 제거
+                              value=$(echo $value | tr -d ' ')  # 값에서 공백 제거
+                              build_args+=" --build-arg $key='$value'"
+                            done < "$env_file"
+                        ''', returnStdout: true).trim()
+
+                        echo "Docker build arguments: ${buildArgs}"
+
+                        // Docker 빌드 명령어 실행
+                        sh "docker build ${buildArgs} -t fastapi-app ."
+                    }
+                }
+            }
+        }
+
+        stage('Push') {
+            steps {
+                
+                // Run tests
+                script {
+                        // withCredentials 스텝을 사용하여 자격 증명에서 사용자 이름과 비밀번호를 추출
+                        withCredentials([usernamePassword(credentialsId: 'geport-fe-dockerhub', passwordVariable: 'DOCKER_PASSWORD', usernameVariable: 'DOCKER_USERNAME')]) 
+                        {
+                                // 추출한 사용자 이름과 비밀번호를 사용하여 Docker에 로그인
+                                sh 'echo $DOCKER_PASSWORD | docker login -u $DOCKER_USERNAME --password-stdin'
+                                sh 'docker tag fastapi-app whitekuj02/fastapi-app:$TAG'
+                                sh 'docker push whitekuj02/fastapi-app:$TAG'
+                                sh 'docker tag fastapi-app whitekuj02/fastapi-app:latest'
+                                sh 'docker push whitekuj02/fastapi-app:latest'
+                                sh 'docker rmi whitekuj02/fastapi-app:$TAG'
+                                sh 'docker rmi whitekuj02/fastapi-app:latest'
+                                sh 'docker rmi fastapi-app'
+                        }
+                    
+                }
+            }
+        }
+
+        stage('Deploy') {
+            steps {
+                // Deploy the application
+                // This can be to a server, Kubernetes cluster, etc.
+                script {
+                    // Example: Docker compose or Kubernetes command to deploy
+                    // withCredentials를 사용하여 Jenkins에 등록된 SSH 자격 증명을 로드
+                    withCredentials([sshUserPrivateKey(credentialsId: 'ssh-key', keyFileVariable: 'SSH_KEY'),
+                                    string(credentialsId: 'ssh-pass', variable: 'SSH_PASS')]) {
+                        // SSH_KEY 환경 변수를 사용하여 SSH 명령 실행
+                        sh "sshpass -p ${SSH_PASS} ssh -o StrictHostKeyChecking=no -i ${SSH_KEY} root@223.130.153.164 'sh /root/yaml/BE/deploy.sh'"
+                        
+                        
+                    }
+                }
+            }
+        }
+        
+    }
+      
+}
+
